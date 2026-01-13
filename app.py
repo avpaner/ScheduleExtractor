@@ -4,92 +4,103 @@ import numpy as np
 import pytesseract
 import pandas as pd
 from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 
-# Setup
-st.set_page_config(page_title="Adaptive Schedule Learner", layout="wide")
+st.set_page_config(page_title="Pen-Marking Schedule Learner", layout="wide")
 
-# Constants
-DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-HOURS = ["7-8", "8-9", "9-10", "10-11", "11-12", "12-1", "1-2", "2-3", "3-4", "4-5", "5-6", "6-7"]
+st.title("🖊️ Pen-Marking Schedule Learner")
+st.write("1. Upload your image. 2. **Draw a rectangle** over one or two class boxes. 3. The system will learn the grid and extract everything.")
 
-st.sidebar.header("🧠 Calibration & Learning")
-st.sidebar.info("Adjust these if the green boxes don't align with your classes.")
-
-# Learning Sliders (These replace manual 'code changes')
-top_pad = st.sidebar.slider("Header Height Offset", 0.0, 0.2, 0.08)
-left_pad = st.sidebar.slider("Time Column Width Offset", 0.0, 0.2, 0.14)
-sensitivity = st.sidebar.slider("Color Sensitivity", 10, 100, 40)
-min_area = st.sidebar.slider("Min Class Size", 0.05, 0.5, 0.25)
-
-st.title("📅 Class Schedule Parser")
-uploaded_file = st.file_uploader("Upload your schedule (e.g., my_schedule.png)", type=["png", "jpg", "jpeg"])
+# --- STEP 1: UPLOAD ---
+uploaded_file = st.file_uploader("Upload Schedule", type=["png", "jpg", "jpeg"])
 
 if uploaded_file:
-    # 1. Load and prepare images
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, 1)
-    h_img, w_img, _ = img.shape
-    img_display = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2RGB)
-    
-    # 2. Color Detection (Learning from the sensitivity slider)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower_green = np.array([sensitivity, 40, 20])
-    upper_green = np.array([85, 255, 120])
-    mask = cv2.inRange(hsv, lower_green, upper_green)
+    bg_image = Image.open(uploaded_file)
+    w, h = bg_image.size
+    # Resize for display if too large, while keeping aspect ratio
+    max_display_width = 800
+    display_ratio = max_display_width / w
+    display_w = int(w * display_ratio)
+    display_h = int(h * display_ratio)
 
-    # 3. Grid-Based Cell Extraction
-    # We divide the image into 7 columns and 13 rows based on offsets
-    col_w = (w_img * (1 - left_pad)) / 6
-    row_h = (h_img * (1 - top_pad)) / 12
-    
-    extracted_data = []
+    # --- STEP 2: PEN TOOL (CANVAS) ---
+    st.subheader("Mark a few classes with the Rectangle Tool")
+    canvas_result = st_canvas(
+        fill_color="rgba(255, 165, 0, 0.3)",  # Transparent orange
+        stroke_width=2,
+        stroke_color="#ff0000",
+        background_image=bg_image,
+        update_streamlit=True,
+        height=display_h,
+        width=display_w,
+        drawing_mode="rect",
+        key="canvas",
+    )
 
-    for c in range(6): # Days
-        for r in range(12): # Hours
-            # Define exact coordinates for this cell
-            x1 = int((w_img * left_pad) + (c * col_w))
-            y1 = int((h_img * top_pad) + (r * row_h))
-            x2 = int(x1 + col_w)
-            y2 = int(y1 + row_h)
-
-            cell_mask = mask[y1:y2, x1:x2]
+    # --- STEP 3: LEARN & PROCESS ---
+    if canvas_result.json_data is not None:
+        objects = canvas_result.json_data["objects"]
+        if len(objects) > 0:
+            st.success(f"System learned from {len(objects)} markings!")
             
-            # If the cell is significantly green (min_area), process it
-            if np.sum(cell_mask == 255) / cell_mask.size > min_area:
-                # OCR Pre-processing
-                roi = img[y1:y2, x1:x2]
-                roi = cv2.resize(roi, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                # Invert colors for white text on dark background
-                thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-                
-                text = pytesseract.image_to_string(thresh, config='--psm 6').strip()
-                
-                # Diagonal Detection: Check top-right corner of the cell
-                is_diagonal = np.mean(cell_mask[:10, -10:]) < 127
-                
-                if text:
-                    lines = [line.strip() for line in text.split('\n') if len(line.strip()) > 1]
-                    extracted_data.append({
-                        "Day": DAYS[c],
-                        "Time": HOURS[r],
-                        "Class": lines[0] if len(lines) > 0 else "N/A",
-                        "Location": lines[1] if len(lines) > 1 else "N/A",
-                        "Shift": "30-min" if is_diagonal else "Regular"
-                    })
+            # Analyze the first marking to set the grid
+            first_mark = objects[0]
+            # Convert canvas coordinates back to original image coordinates
+            mx = first_mark["left"] / display_ratio
+            my = first_mark["top"] / display_ratio
+            mw = first_mark["width"] / display_ratio
+            mh = first_mark["height"] / display_ratio
+
+            # Calculate Grid based on the position of your marking
+            # (Assuming standard 7-col, 13-row structure)
+            col_w = w / 7
+            row_h = h / 13
+            
+            # Convert image for OpenCV
+            img = cv2.cvtColor(np.array(bg_image), cv2.COLOR_RGB2BGR)
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            
+            # LEARN COLOR: Sample the color inside your marking
+            roi_hsv = hsv[int(my):int(my+mh), int(mx):int(mx+mw)]
+            avg_h = np.median(roi_hsv[:,:,0])
+            
+            # Create mask based on LEARNED color
+            lower_green = np.array([avg_h - 10, 40, 20])
+            upper_green = np.array([avg_h + 10, 255, 120])
+            mask = cv2.inRange(hsv, lower_green, upper_green)
+
+            # Process Grid
+            DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+            HOURS = ["7-8", "8-9", "9-10", "10-11", "11-12", "12-1", "1-2", "2-3", "3-4", "4-5", "5-6", "6-7"]
+            results = []
+
+            for c in range(1, 7): # Skip Time col
+                for r in range(1, 13): # Skip Header row
+                    x1, y1 = int(c * col_w), int(r * row_h)
+                    x2, y2 = int((c+1) * col_w), int((r+1) * row_h)
                     
-                    # Highlight cell on display
-                    cv2.rectangle(img_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cell_mask = mask[y1:y2, x1:x2]
+                    if np.sum(cell_mask == 255) / cell_mask.size > 0.3:
+                        # OCR
+                        cell_roi = img[y1:y2, x1:x2]
+                        cell_roi = cv2.resize(cell_roi, None, fx=2, fy=2)
+                        gray = cv2.cvtColor(cell_roi, cv2.COLOR_BGR2GRAY)
+                        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+                        
+                        text = pytesseract.image_to_string(thresh, config='--psm 6').strip()
+                        
+                        # Diagonal check (is the corner empty?)
+                        is_diag = np.mean(cell_mask[:10, -10:]) < 100
 
-    # Output Display
-    if extracted_data:
-        df = pd.DataFrame(extracted_data)
-        st.subheader("Extracted Schedule Table")
-        st.dataframe(df, use_container_width=True)
-        
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Download Schedule CSV", csv, "schedule.csv", "text/csv")
-    else:
-        st.error("No classes detected. Adjust the 'Color Sensitivity' or 'Offsets' in the sidebar.")
+                        if text:
+                            lines = text.split('\n')
+                            results.append({
+                                "Day": DAYS[c-1],
+                                "Time": HOURS[r-1],
+                                "Class": lines[0] if len(lines) > 0 else "N/A",
+                                "Type": "30-min Shift" if is_diag else "Full Hour"
+                            })
 
-    st.image(img_display, caption="Detection Result (Green boxes = Scanned Grid Cells)")
+            if results:
+                st.dataframe(pd.DataFrame(results))
+                st.download_button("Download CSV", pd.DataFrame(results).to_csv().encode('utf-8'))
