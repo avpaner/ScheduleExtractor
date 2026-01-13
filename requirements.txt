@@ -1,4 +1,6 @@
 streamlit
+opencv-python-headless
+pytesseract
 pandas
-plotly
-kaleido
+numpy
+Pillow
