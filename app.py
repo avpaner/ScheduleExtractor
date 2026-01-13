@@ -1,121 +1,72 @@
 import streamlit as st
-import cv2
-import numpy as np
-import pytesseract
 import pandas as pd
-from PIL import Image
-from streamlit_drawable_canvas import st_canvas
+import plotly.figure_factory as ff
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="Pen-Marking Schedule Learner", layout="wide")
+st.set_page_config(page_title="CSV to HD Schedule", layout="wide")
 
-st.title("🖊️ Pen-Marking Schedule Learner")
-st.write("1. Upload Image | 2. Draw a rectangle over ONE class to 'teach' the color | 3. Get results")
+st.title("🖼️ CSV to HD Schedule Converter")
+st.write("Upload your CSV to generate a crystal-clear, high-resolution PNG schedule.")
 
-# --- STEP 1: UPLOAD ---
-uploaded_file = st.file_uploader("Upload Schedule", type=["png", "jpg", "jpeg"])
+uploaded_file = st.file_uploader("Upload Schedule CSV", type="csv")
 
 if uploaded_file:
-    # Use PIL to open the image
-    bg_image = Image.open(uploaded_file)
+    df = pd.DataFrame(pd.read_csv(uploaded_file))
     
-    # FIX: Convert PIL image to a NumPy array to avoid internal AttributeErrors 
-    # in the drawable-canvas library's image_to_url function.
-    bg_array = np.array(bg_image)
+    # Define the 7x13 Grid Structure
+    days = ["Time", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    hours = ["7:00", "8:00", "9:00", "10:00", "11:00", "12:00", "1:00", "2:00", "3:00", "4:00", "5:00", "6:00"]
     
-    w_orig, h_orig = bg_image.size
+    # Create an empty matrix for the table
+    schedule_matrix = [["" for _ in range(len(days))] for _ in range(len(hours))]
     
-    # Scale for display to fit the screen
-    display_width = 1000
-    ratio = display_width / w_orig
-    display_height = int(h_orig * ratio)
+    # Fill the Time column
+    for i, h in enumerate(hours):
+        schedule_matrix[i][0] = f"<b>{h}</b>"
 
-    # --- STEP 2: PEN TOOL (RECTANGLE) ---
-    st.subheader("Draw a rectangle over a dark green class box")
-    
-    # We pass the NumPy array (bg_array) instead of the PIL object
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 165, 0, 0.3)",
-        stroke_width=2,
-        stroke_color="#ff0000",
-        background_image=Image.fromarray(bg_array), # Re-wrap just for the component
-        update_streamlit=True,
-        height=display_height,
-        width=display_width,
-        drawing_mode="rect",
-        key="canvas",
-    )
-
-    # --- STEP 3: PROCESS DATA ---
-    if canvas_result.json_data is not None:
-        # Use .get() to safely access the list of drawn objects
-        objects = canvas_result.json_data.get("objects", [])
-        
-        if len(objects) > 0:
-            st.success(f"System learning from your marking...")
+    # Fill the matrix with CSV data
+    for _, row in df.iterrows():
+        try:
+            d_idx = days.index(row['Day'])
+            # Logic to find the hour row (e.g., "7-8" matches "7:00")
+            h_str = row['Time'].split('-')[0].strip()
+            h_idx = -1
+            for i, h in enumerate(hours):
+                if h_str in h:
+                    h_idx = i
+                    break
             
-            # Use the most recent mark
-            last_mark = objects[-1]
-            
-            # Rescale coordinates back to original image size
-            mx = last_mark["left"] / ratio
-            my = last_mark["top"] / ratio
-            mw = last_mark["width"] / ratio
-            mh = last_mark["height"] / ratio
+            if h_idx != -1:
+                # Format cell text
+                cell_text = f"<b>{row['Class']}</b><br>{row['Location']}"
+                if row.get('Type') == "30-min Shift":
+                    cell_text += "<br><i>(30m Shift)</i>"
+                schedule_matrix[h_idx][d_idx] = cell_text
+        except:
+            continue
 
-            # Convert to OpenCV BGR for processing
-            img = cv2.cvtColor(bg_array, cv2.COLOR_RGB2BGR)
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            
-            # Sample color from your pen mark
-            roi_hsv = hsv[int(my):int(my+mh), int(mx):int(mx+mw)]
-            
-            if roi_hsv.size > 0:
-                avg_h = np.median(roi_hsv[:,:,0])
-                
-                # Create mask based on YOUR learned color
-                lower_green = np.array([avg_h - 10, 40, 20])
-                upper_green = np.array([avg_h + 10, 255, 255])
-                mask = cv2.inRange(hsv, lower_green, upper_green)
+    # Create the Table Figure
+    fig = go.Figure(data=[go.Table(
+        header=dict(
+            values=[f"<b>{d}</b>" for d in days],
+            fill_color='#1B5E20', # Dark UPLB Green
+            align='center',
+            font=dict(color='white', size=14),
+            height=40
+        ),
+        cells=dict(
+            values=list(zip(*schedule_matrix)),
+            fill_color=[['#f8f9fa', '#e8f5e9']*6], # Alternating row colors
+            align='center',
+            font=dict(color='black', size=12),
+            height=60
+        )
+    )])
 
-                # Grid Layout (7 cols, 13 rows)
-                col_w = w_orig / 7
-                row_h = h_orig / 13
-                
-                DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-                HOURS = ["7-8", "8-9", "9-10", "10-11", "11-12", "12-1", "1-2", "2-3", "3-4", "4-5", "5-6", "6-7"]
-                results = []
+    fig.update_layout(width=1200, height=800, margin=dict(l=10, r=10, t=10, b=10))
 
-                for c in range(1, 7): # Skip Time column
-                    for r in range(1, 13): # Skip Header row
-                        x1, y1 = int(c * col_w), int(r * row_h)
-                        x2, y2 = int((c+1) * col_w), int((r+1) * row_h)
-                        
-                        cell_mask = mask[y1:y2, x1:x2]
-                        
-                        # If cell is > 20% green, it's a class
-                        if np.sum(cell_mask == 255) / cell_mask.size > 0.2:
-                            cell_roi = img[y1:y2, x1:x2]
-                            cell_roi = cv2.resize(cell_roi, None, fx=2, fy=2)
-                            gray = cv2.cvtColor(cell_roi, cv2.COLOR_BGR2GRAY)
-                            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-                            
-                            text = pytesseract.image_to_string(thresh, config='--psm 6').strip()
-                            is_diag = np.mean(cell_mask[:10, -10:]) < 100 
+    # Display in App
+    st.plotly_chart(fig, use_container_width=True)
 
-                            if text:
-                                lines = [l.strip() for l in text.split('\n') if len(l.strip()) > 1]
-                                results.append({
-                                    "Day": DAYS[c-1],
-                                    "Time": HOURS[r-1],
-                                    "Class": lines[0] if len(lines) > 0 else "N/A",
-                                    "Location": lines[1] if len(lines) > 1 else "N/A",
-                                    "Type": "30-min Shift" if is_diag else "Full Hour"
-                                })
-
-                if results:
-                    df = pd.DataFrame(results)
-                    st.subheader("Extracted Schedule")
-                    st.dataframe(df, use_container_width=True)
-                    st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "schedule.csv", "text/csv")
-        else:
-            st.info("Draw a rectangle over one of the green class boxes to start detection.")
+    # Export Logic
+    st.info("To save as PNG: Hover over the chart above and click the **Camera Icon** (Download plot as a png).")
