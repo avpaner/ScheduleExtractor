@@ -1,7 +1,4 @@
 streamlit
-opencv-python-headless
-pytesseract
-numpy
-
-Pillow
-streamlit-drawable-canvas
+pandas
+plotly
+kaleido
