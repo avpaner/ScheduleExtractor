@@ -1,16 +1,16 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
+import json
+import io
 from datetime import datetime, timedelta
 import re
-import io
 
 app = FastAPI()
 
-# IMPORTANT: This allows your HTML website to talk to this Python API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -30,29 +30,35 @@ def robust_time_parse(t_str):
 
 @app.post("/process")
 async def process_schedule(file: UploadFile = File(...)):
-    # Read the uploaded CSV
     content = await file.read()
-    df = pd.read_csv(io.BytesIO(content))
     
+    # Handle JSON or CSV
+    if file.filename.endswith('.json'):
+        data = json.loads(content)
+        df = pd.DataFrame(data)
+        # Normalize keys if JSON uses different naming
+        df = df.rename(columns={'startTime': 'Start Time', 'endTime': 'End Time', 'day': 'Day'})
+    else:
+        df = pd.read_csv(io.BytesIO(content))
+
     DAY_MAP = {'M': 'Monday', 'T': 'Tuesday', 'W': 'Wednesday', 'TH': 'Thursday', 'F': 'Friday', 'S': 'Saturday'}
     busy_ids = []
-    
+
     for _, row in df.iterrows():
-        day_full = DAY_MAP.get(str(row['Day']).strip())
-        start_dt = robust_time_parse(row['Start Time'])
-        end_dt = robust_time_parse(row['End Time'])
-        
+        day_val = str(row.get('Day', '')).strip().upper()
+        day_full = DAY_MAP.get(day_val, day_val)
+        start_dt = robust_time_parse(row.get('Start Time'))
+        end_dt = robust_time_parse(row.get('End Time'))
+
         if day_full and start_dt and end_dt:
             curr = start_dt
             while curr < end_dt:
-                # This creates IDs like "Monday-800AM" to match your HTML
                 hour = curr.hour
                 ampm = "AM" if hour < 12 else "PM"
                 dh = hour - 12 if hour > 12 else (12 if hour == 0 else hour)
                 minute = curr.strftime("%M")
-                
-                slot_id = f"{day_full}-{dh}{minute}{ampm}"
-                busy_ids.append(slot_id)
+                # Format exactly matches HTML ID: Monday-800AM
+                busy_ids.append(f"{day_full}-{dh}{minute}{ampm}")
                 curr += timedelta(minutes=30)
-                
+
     return {"busy_slots": list(set(busy_ids))}
