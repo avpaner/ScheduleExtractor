@@ -9,13 +9,19 @@ from streamlit_drawable_canvas import st_canvas
 st.set_page_config(page_title="Pen-Marking Schedule Learner", layout="wide")
 
 st.title("🖊️ Pen-Marking Schedule Learner")
-st.write("1. Upload Image | 2. Draw a box over ONE class to 'teach' the color | 3. Get results")
+st.write("1. Upload Image | 2. Draw a rectangle over ONE class to 'teach' the color | 3. Get results")
 
 # --- STEP 1: UPLOAD ---
 uploaded_file = st.file_uploader("Upload Schedule", type=["png", "jpg", "jpeg"])
 
 if uploaded_file:
+    # Use PIL to open the image
     bg_image = Image.open(uploaded_file)
+    
+    # FIX: Convert PIL image to a NumPy array to avoid internal AttributeErrors 
+    # in the drawable-canvas library's image_to_url function.
+    bg_array = np.array(bg_image)
+    
     w_orig, h_orig = bg_image.size
     
     # Scale for display to fit the screen
@@ -25,11 +31,13 @@ if uploaded_file:
 
     # --- STEP 2: PEN TOOL (RECTANGLE) ---
     st.subheader("Draw a rectangle over a dark green class box")
+    
+    # We pass the NumPy array (bg_array) instead of the PIL object
     canvas_result = st_canvas(
-        fill_color="rgba(255, 165, 0, 0.3)",  # Transparent orange
+        fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=2,
         stroke_color="#ff0000",
-        background_image=bg_image,
+        background_image=Image.fromarray(bg_array), # Re-wrap just for the component
         update_streamlit=True,
         height=display_height,
         width=display_width,
@@ -37,34 +45,36 @@ if uploaded_file:
         key="canvas",
     )
 
-    # --- STEP 3: PROCESS WITH ERROR HANDLING ---
-    # We use .get() to prevent AttributeError if JSON data is missing
+    # --- STEP 3: PROCESS DATA ---
     if canvas_result.json_data is not None:
+        # Use .get() to safely access the list of drawn objects
         objects = canvas_result.json_data.get("objects", [])
         
         if len(objects) > 0:
-            st.success(f"Learning from {len(objects)} marked area(s)...")
+            st.success(f"System learning from your marking...")
             
-            # Use the first marking to learn the color
+            # Use the most recent mark
             last_mark = objects[-1]
+            
             # Rescale coordinates back to original image size
             mx = last_mark["left"] / ratio
             my = last_mark["top"] / ratio
             mw = last_mark["width"] / ratio
             mh = last_mark["height"] / ratio
 
-            # Convert PIL image to OpenCV BGR
-            img = cv2.cvtColor(np.array(bg_image), cv2.COLOR_RGB2BGR)
+            # Convert to OpenCV BGR for processing
+            img = cv2.cvtColor(bg_array, cv2.COLOR_RGB2BGR)
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             
-            # Sample the color from your marking to 'learn' it
+            # Sample color from your pen mark
             roi_hsv = hsv[int(my):int(my+mh), int(mx):int(mx+mw)]
+            
             if roi_hsv.size > 0:
                 avg_h = np.median(roi_hsv[:,:,0])
                 
-                # Define masks based on YOUR marking
+                # Create mask based on YOUR learned color
                 lower_green = np.array([avg_h - 10, 40, 20])
-                upper_green = np.array([avg_h + 10, 255, 120])
+                upper_green = np.array([avg_h + 10, 255, 255])
                 mask = cv2.inRange(hsv, lower_green, upper_green)
 
                 # Grid Layout (7 cols, 13 rows)
@@ -81,6 +91,7 @@ if uploaded_file:
                         x2, y2 = int((c+1) * col_w), int((r+1) * row_h)
                         
                         cell_mask = mask[y1:y2, x1:x2]
+                        
                         # If cell is > 20% green, it's a class
                         if np.sum(cell_mask == 255) / cell_mask.size > 0.2:
                             cell_roi = img[y1:y2, x1:x2]
@@ -89,8 +100,6 @@ if uploaded_file:
                             thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
                             
                             text = pytesseract.image_to_string(thresh, config='--psm 6').strip()
-                            
-                            # Diagonal Check (30-min shift)
                             is_diag = np.mean(cell_mask[:10, -10:]) < 100 
 
                             if text:
@@ -109,4 +118,4 @@ if uploaded_file:
                     st.dataframe(df, use_container_width=True)
                     st.download_button("Download CSV", df.to_csv(index=False).encode('utf-8'), "schedule.csv", "text/csv")
         else:
-            st.info("Awaiting your marking. Please draw a rectangle over a class box on the image above.")
+            st.info("Draw a rectangle over one of the green class boxes to start detection.")
