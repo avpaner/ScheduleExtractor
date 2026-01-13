@@ -1,35 +1,32 @@
 import streamlit as st
-import pandas as pd
 import json
+import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import re
 
-st.set_page_config(page_title="AMIS 30-Min Schedule Plotter", layout="wide")
+st.set_page_config(page_title="AMIS HD Schedule Fixed", layout="wide")
 
-st.title("📅 AMIS 30-Minute HD Schedule")
-st.write("Grid updated to 30-minute intervals (7:00 AM to 7:00 PM).")
+st.title("📅 AMIS 30-Min Precision Schedule")
+st.write("Fixed time discrepancy for PM classes and 30-minute interval accuracy.")
 
-DAY_MAP = {
-    'M': 'Monday', 'T': 'Tuesday', 'W': 'Wednesday', 
-    'TH': 'Thursday', 'F': 'Friday', 'S': 'Saturday'
-}
+# Mapping for AMIS shorthand days
+DAY_MAP = {'M': 'Monday', 'T': 'Tuesday', 'W': 'Wednesday', 'TH': 'Thursday', 'F': 'Friday', 'S': 'Saturday'}
 
-# --- IMPROVED 30-MIN TIME LOGIC ---
 def robust_time_parse(t_str):
-    if not t_str or pd.isna(t_str):
-        return None
+    if not t_str or pd.isna(t_str): return None
     t_str = str(t_str).strip().upper()
-    # Add space before AM/PM (fix 05:30PM -> 05:30 PM)
+    # Add space before AM/PM to fix "05:30PM"
     t_str = re.sub(r'([AP]M)', r' \1', t_str).strip()
     
     try:
+        # Standard 12-hour parse
         return datetime.strptime(t_str, "%I:%M %p")
     except ValueError:
         try:
-            # Fallback for "11:30" or "05:00"
+            # Fallback for "11:30" or "05:00" missing AM/PM
             dt = datetime.strptime(t_str, "%H:%M")
-            # UPLB Heuristic: 1-6 is PM
+            # School logic: 1-6 is PM (13:00-18:00)
             if 1 <= dt.hour <= 6:
                 return dt.replace(hour=dt.hour + 12)
             return dt
@@ -37,111 +34,92 @@ def robust_time_parse(t_str):
             return None
 
 def get_row_index(dt):
-    """Maps time to 30-minute rows. 7:00 AM is 0, 7:30 AM is 1, etc."""
+    """Calculates row index based on 30-minute steps from 7:00 AM."""
     if not dt: return -1
-    h = dt.hour
-    m = dt.minute
-    # Calculate index based on 7:00 AM start
-    # Formula: (Hours from 7) * 2 + (1 if minutes >= 30)
-    if 7 <= h <= 19:
-        idx = (h - 7) * 2 + (1 if m >= 30 else 0)
-        return idx
-    return -1
+    # We use a reference time of 7:00 AM to calculate the offset
+    start_of_day = dt.replace(hour=7, minute=0)
+    delta = dt - start_of_day
+    total_minutes = delta.total_seconds() / 60
+    return int(total_minutes // 30)
 
-# --- FILE LOADING ---
-uploaded_file = st.file_uploader("Upload your CSV or JSON", type=["csv", "json"])
+uploaded_file = st.file_uploader("Upload 2S2425-SCHED (JSON or CSV)", type=["csv", "json"])
 
 if uploaded_file:
     try:
+        # --- DATA NORMALIZATION ---
         raw_data = []
         if uploaded_file.name.endswith('.json'):
             data = json.load(uploaded_file)
             for item in data:
                 raw_data.append({
-                    'day': item.get('day'),
-                    'start': item.get('startTime'),
-                    'end': item.get('endTime'),
-                    'subject': item.get('subject'),
-                    'room': item.get('room')
+                    'day': item.get('day'), 'start': item.get('startTime'),
+                    'end': item.get('endTime'), 'subject': item.get('subject'), 'room': item.get('room')
                 })
         else:
             df = pd.read_csv(uploaded_file)
             for _, row in df.iterrows():
                 raw_data.append({
-                    'day': row.get('Day'),
-                    'start': row.get('Start Time'),
-                    'end': row.get('End Time'),
-                    'subject': row.get('Class'),
-                    'room': row.get('Location')
+                    'day': row.get('Day'), 'start': row.get('Start Time'),
+                    'end': row.get('End Time'), 'subject': row.get('Class'), 'room': row.get('Location')
                 })
 
-        # --- 30-MIN GRID INITIALIZATION ---
+        # --- GRID SETUP (7:00 AM to 7:00 PM = 24 slots) ---
         days_list = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
         header = ["Time"] + days_list
         
-        # Generate 24 labels for 30-minute intervals
         time_labels = []
-        current_time = datetime.strptime("07:00 AM", "%I:%M %p")
-        for _ in range(24):
-            time_labels.append(current_time.strftime("%I:%M %p"))
-            current_time += timedelta(minutes=30)
+        curr = datetime.strptime("07:00 AM", "%I:%M %p")
+        for _ in range(25): # Up to 7:00 PM
+            time_labels.append(curr.strftime("%I:%M %p"))
+            curr += timedelta(minutes=30)
         
-        # 24 rows x 7 columns
+        # 24 rows (each representing a 30-min block), 7 columns
         matrix = [["" for _ in range(7)] for _ in range(24)]
-        for i, lbl in enumerate(time_labels):
-            matrix[i][0] = f"<b>{lbl}</b>"
+        for i in range(24):
+            matrix[i][0] = f"<b>{time_labels[i]}</b>"
 
-        # --- PLOTTING ---
+        # --- PRECISION PLOTTING ---
         for entry in raw_data:
             day_name = DAY_MAP.get(str(entry['day']).strip())
             if day_name in days_list:
                 col_idx = days_list.index(day_name) + 1
                 
-                start_dt = robust_time_parse(entry['start'])
-                end_dt = robust_time_parse(entry['end'])
+                s_dt = robust_time_parse(entry['start'])
+                e_dt = robust_time_parse(entry['end'])
                 
-                if start_dt and end_dt:
-                    s_row = get_row_index(start_dt)
-                    e_row = get_row_index(end_dt)
+                if s_dt and e_dt:
+                    s_row = get_row_index(s_dt)
+                    e_row = get_row_index(e_dt)
                     
-                    # If end time is exactly on a 30-min mark (e.g., 10:30), 
-                    # don't fill the slot starting at 10:30.
-                    if end_dt.minute % 30 == 0:
-                        e_row -= 1
+                    # Fill all 30-minute slots between start and end
+                    # Example: 1:00 PM (row 12) to 4:00 PM (row 18)
+                    for r_idx in range(s_row, e_row):
+                        if 0 <= r_idx < 24:
+                            t_range = f"{s_dt.strftime('%I:%M')}-{e_dt.strftime('%I:%M')}"
+                            info = f"<b>{entry['subject']}</b><br>{entry['room']}<br><small>{t_range}</small>"
+                            
+                            if matrix[r_idx][col_idx] == "":
+                                matrix[r_idx][col_idx] = info
+                            elif entry['subject'] not in matrix[r_idx][col_idx]:
+                                matrix[r_idx][col_idx] += f"<hr style='margin:1px;'>{info}"
 
-                    if s_row != -1:
-                        e_row = min(e_row, 23) # Cap at the last 6:30 PM slot
-                        for r_idx in range(s_row, e_row + 1):
-                            if 0 <= r_idx < 24:
-                                t_range = f"{start_dt.strftime('%I:%M')}-{end_dt.strftime('%I:%M')}"
-                                info = f"<b>{entry['subject']}</b><br>{entry['room']}<br><small>{t_range}</small>"
-                                
-                                # Add content or append if overlapping
-                                if matrix[r_idx][col_idx] == "":
-                                    matrix[r_idx][col_idx] = info
-                                elif entry['subject'] not in matrix[r_idx][col_idx]:
-                                    matrix[r_idx][col_idx] += f"<hr style='margin:1px;'>{info}"
-
-        # --- RENDER ---
+        # --- RENDER HD TABLE ---
         fig = go.Figure(data=[go.Table(
-            columnwidth = [80, 150, 150, 150, 150, 150, 150],
+            columnwidth = [90, 150, 150, 150, 150, 150, 150],
             header=dict(
                 values=[f"<b>{h}</b>" for h in header],
-                fill_color='#1B5E20', font=dict(color='white', size=14),
-                height=40, align='center'
+                fill_color='#1B5E20', font=dict(color='white', size=14), height=40
             ),
             cells=dict(
                 values=list(zip(*matrix)),
-                fill_color=[['#ffffff', '#f1f8e9']*12], # Zebra rows
-                align='center', 
-                font=dict(color='#212121', size=10),
-                height=60 # Slightly shorter cells because there are more rows
+                fill_color=[['#ffffff', '#f9f9f9']*12],
+                align='center', font=dict(color='#212121', size=10), height=55
             )
         )])
 
-        fig.update_layout(width=1100, height=1600, margin=dict(l=10, r=10, t=10, b=10))
+        fig.update_layout(width=1100, height=1500, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
-        st.success("Successfully generated 30-minute interval schedule.")
+        st.success("Precision grid generated. No more time discrepancies.")
 
     except Exception as e:
         st.error(f"Error: {e}")
