@@ -1,4 +1,4 @@
-streamlit
+fastapi
+uvicorn[standard]
 pandas
-plotly
-kaleido
+python-multipart
